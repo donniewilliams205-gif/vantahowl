@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: vantahowl
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FOUNDER_USERNAME
+        value: bludhound420
+      - key: DATA_DIR
+        value: /var/data
+      - key: JWT_SECRET
+        generateValue: true
+    disk:
+      name: vantahowl-data
+      mountPath: /var/data
+      sizeGB: 1
