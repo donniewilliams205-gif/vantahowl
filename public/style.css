@@ -223,6 +223,57 @@ textarea { resize: vertical; }
 
 footer { text-align: center; color: var(--muted); padding: 26px 10px 34px; font-size: 14px; }
 
+/* ---- feature pack ---- */
+.live-banner {
+  display: block; text-align: center; padding: 12px 16px; margin: 14px auto 0;
+  max-width: 1240px; border-radius: 12px; font-weight: 800; letter-spacing: .4px;
+  color: #fff; background: linear-gradient(90deg, #7a0215, var(--crimson), #7a0215);
+  border: 1px solid var(--gold); text-decoration: none;
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+.live-banner[hidden] { display: none; }
+@keyframes live-pulse { 0%,100% { box-shadow: 0 0 0 rgba(225,6,44,.0); } 50% { box-shadow: 0 0 22px rgba(225,6,44,.65); } }
+.nav-badge {
+  background: var(--crimson); color: #fff; border-radius: 999px;
+  padding: 0 7px; font-size: 12px; font-weight: 800; margin-left: 4px;
+}
+.howl-card { text-align: center; }
+.howl-btn {
+  font-size: 26px; font-weight: 900; letter-spacing: 1px; padding: 16px 34px;
+  border-radius: 999px; color: #fff; background: radial-gradient(circle at 50% 35%, #3a3f52, #14161f 70%);
+  border: 2px solid var(--gold); cursor: pointer; margin: 8px 0;
+}
+.howl-btn:hover { box-shadow: 0 0 26px rgba(244,197,66,.45); }
+.howl-btn.howled { animation: howl-pop .45s ease-out; }
+@keyframes howl-pop { 0% { transform: scale(1); } 40% { transform: scale(1.12) rotate(-2deg); } 100% { transform: scale(1); } }
+.howl-stats { font-size: 17px; }
+.dm-messages { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.dm-msg { background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 7px 11px; max-width: 85%; align-self: flex-start; }
+.dm-msg.mine { align-self: flex-end; border-color: rgba(244,197,66,.5); }
+.dm-msg .post-time { display: block; font-size: 11px; margin-top: 2px; }
+.wp-player { margin: 10px 0; }
+.emote-img { width: 22px; height: 22px; object-fit: contain; vertical-align: -5px; border-radius: 4px; }
+.emote-bar { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }
+.emote-btn { background: none; border: 1px solid transparent; border-radius: 8px; cursor: pointer; padding: 2px; }
+.emote-btn:hover { border-color: var(--line); background: var(--panel2); }
+.emote-gallery, .emote-chip { display: inline-block; }
+.emote-chip { background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; margin: 2px; font-size: 13px; }
+.battle-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.battle-side { background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.battle-side.winner { border-color: var(--gold); box-shadow: 0 0 18px rgba(244,197,66,.35); }
+@media (max-width: 720px) { .battle-grid { grid-template-columns: 1fr; } }
+.event-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.event-row:last-child { border-bottom: 0; }
+.idea-chip { background: rgba(244,197,66,.15); border: 1px solid var(--gold); color: var(--gold); border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 700; }
+.profile-banner { width: 100%; max-height: 150px; object-fit: cover; border-radius: 10px; margin-bottom: 10px; }
+.now-playing { color: var(--gold); font-size: 13px; }
+.now-playing-big { color: var(--gold); font-weight: 700; }
+#profileEditCard label, #eventsAdminCard label, #battleCreateCard label { display: block; margin: 8px 0; }
+#profileEditCard input[type="text"], #eventsAdminCard input[type="text"], #battleCreateCard input, #battleCreateCard select, #eventsAdminCard select { width: 100%; margin-top: 4px; }
+#ideaText { width: 100%; margin-bottom: 10px; }
+.composer-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.composer-row input { flex: 1; min-width: 140px; }
+
 @media (max-width: 1100px) {
   .layout { grid-template-columns: 200px minmax(0,1fr); }
   .chat-panel { grid-column: 1 / -1; position: static; max-height: 480px; }

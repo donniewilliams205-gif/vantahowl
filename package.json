@@ -1,6 +1,6 @@
 {
   "name": "vantahowl",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Vantahowl — a community home for Bludhound420 and the pack: channels, posts, live chat, voice & video lounge, coins, quests and an arcade.",
   "private": true,
   "main": "server.js",

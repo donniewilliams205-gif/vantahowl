@@ -8,6 +8,9 @@ const state = {
   me: null, csrf: null, settings: null, channels: [], gifts: [], badgesMeta: [],
   reactions: [], vibes: [], currentChannel: null, socket: null,
   gnTimer: null, uploadUrl: null,
+  emotes: [], live: null, dmUnread: 0, dmPartner: null,
+  party: { state: null, canHost: false },
+  emoteUploadUrl: null, bannerUrl: undefined,
 };
 
 function esc(s) {
@@ -16,6 +19,33 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function fmtTime(ts) { return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+
+/* Escape first, then swap :emote: tokens for approved pack emote images. */
+function richText(s) {
+  let out = esc(s);
+  if (state.emotes.length) {
+    out = out.replace(/:([a-z0-9_]{2,24}):/g, (m, name) => {
+      const e = state.emotes.find((x) => x.name === name);
+      return e ? '<img class="emote-img" src="' + esc(e.image) + '" alt=":' + esc(name) + ':" title=":' + esc(name) + ':">' : m;
+    });
+  }
+  return out;
+}
+
+function setDmUnread(n) {
+  state.dmUnread = Math.max(0, n || 0);
+  const badge = $('#dmBadge');
+  badge.hidden = state.dmUnread === 0;
+  badge.textContent = state.dmUnread;
+}
+
+function applyLive() {
+  const live = state.live;
+  const banner = $('#liveBanner');
+  if (!live) { banner.hidden = true; return; }
+  banner.hidden = !live.show;
+  if (live.url) banner.href = live.url;
+}
 
 async function api(path, opts) {
   opts = opts || {};
@@ -48,8 +78,9 @@ function setCoins(n) {
 function authorHtml(a) {
   if (!a) return '<span class="author">a departed wolf</span>';
   const crown = a.role === 'founder' ? ' <span class="founder-badge">👑 Founder</span>' : a.role === 'moderator' ? ' <span class="mod-badge">🛡️ Mod</span>' : '';
+  const playing = a.nowPlaying ? ' <span class="now-playing">🎮 ' + esc(a.nowPlaying) + '</span>' : '';
   return '<span class="author" style="color:' + esc(a.accent || '#f2f0ea') + '">' + esc(a.displayName) +
-    '</span> <span class="rank">' + esc(a.rank.icon) + ' ' + esc(a.rank.name) + '</span>' + crown;
+    '</span> <span class="rank">' + esc(a.rank.icon) + ' ' + esc(a.rank.name) + '</span>' + crown + playing;
 }
 
 /* ---------------- starfield ---------------- */
@@ -84,9 +115,15 @@ async function boot() {
   state.badgesMeta = data.badges;
   state.reactions = data.reactions;
   state.vibes = data.vibes;
+  state.emotes = data.emotes || [];
+  state.live = data.live || null;
+  applyLive();
+  setDmUnread(data.dmUnread || 0);
+  renderEmoteBar();
   renderHeader();
   renderChannels();
   applySettings();
+  loadHowl();
   const lobby = state.channels.find((c) => c.name === 'The Lobby') || state.channels[0];
   if (lobby) selectChannel(lobby.id);
   if (state.me) connectSocket();
@@ -162,6 +199,8 @@ async function loadFeed() {
   const data = await api('/api/channels/' + id + '/feed');
   const list = $('#feedList');
   list.innerHTML = '';
+  renderLobbySlot(data);
+  renderJukebox(data.jukebox);
   $('#spotlightSlot').innerHTML = data.spotlight ? postHtml(data.spotlight, true) : '';
   $('#songSlot').innerHTML = data.songOfDay
     ? '<div class="card post spotlight"><div class="spotlight-tag">🎵 SONG OF THE DAY</div><h3>' + esc(data.songOfDay.title) + '</h3>' +
@@ -174,6 +213,71 @@ async function loadFeed() {
   }
   bindPostEvents(list);
   bindPostEvents($('#spotlightSlot'));
+}
+
+/* Lobby extras: Pack MVP spotlight + upcoming events with RSVP. */
+function renderLobbySlot(data) {
+  const slot = $('#lobbySlot');
+  let html = '';
+  if (data.mvp) {
+    html += '<div class="card post spotlight"><div class="spotlight-tag">⭐ PACK MVP OF THE WEEK</div>' +
+      '<div class="post-head"><div>' + authorHtml(data.mvp.user) + '</div><span class="post-time">' + data.mvp.weeklyPoints + ' pts this week</span></div>' +
+      '<p class="muted">The most active wolf in the pack right now. Howl loud for them! 🐺</p></div>';
+  }
+  if (data.events && data.events.length) {
+    html += '<div class="card"><h3>📅 Coming Up</h3>' + data.events.map((e) =>
+      '<div class="event-row"><div><b>' + esc(e.title) + '</b> <span class="muted">· ' + esc(e.kind) + ' · ' +
+      new Date(e.at).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</span>' +
+      (e.description ? '<br><span class="muted">' + esc(e.description) + '</span>' : '') +
+      '<br><span class="tiny muted">' + e.going + ' going</span></div>' +
+      (state.me ? '<button class="btn ' + (e.mine ? 'gold' : 'ghost') + ' small" data-rsvp="' + e.id + '">' + (e.mine ? '✓ Going' : 'RSVP') + '</button>' : '') +
+      '</div>').join('') + '</div>';
+  }
+  slot.innerHTML = html;
+  slot.querySelectorAll('[data-rsvp]').forEach((b) => b.onclick = async () => {
+    try { await api('/api/events/' + b.dataset.rsvp + '/rsvp', { method: 'POST' }); loadFeed(); } catch (e) { toast(e.message); }
+  });
+}
+
+/* Music channel jukebox panel. */
+function renderJukebox(jb) {
+  const slot = $('#jukeboxSlot');
+  if (!jb) { slot.innerHTML = ''; return; }
+  const np = jb.nowPlaying;
+  let html = '<div class="card"><h3>🎧 Pack Jukebox</h3>';
+  html += np
+    ? '<div class="spotlight-tag">▶ NOW PLAYING</div><iframe class="yt-frame" src="https://www.youtube-nocookie.com/embed/' + esc(np.youtubeId) + '" allowfullscreen title="Now playing"></iframe>' +
+      '<p><b>' + esc(np.title) + '</b> <span class="muted">queued by ' + esc(np.addedBy ? np.addedBy.displayName : '?') + ' · ' + np.votes + ' votes</span></p>'
+    : '<p class="muted">The queue is silent. Drop the first track.</p>';
+  html += jb.queue.map((j) =>
+    '<div class="lb-row"><span>' + esc(j.title) + ' <span class="muted tiny">by ' + esc(j.addedBy ? j.addedBy.displayName : '?') + '</span></span>' +
+    '<span><button class="btn ' + (j.mine ? 'gold' : 'ghost') + ' small" data-jb-vote="' + j.id + '">▲ ' + j.votes + '</button> ' +
+    '<button class="btn ghost small" data-jb-del="' + j.id + '">✕</button></span></div>').join('');
+  if (state.me) {
+    html += '<div class="composer-row"><input type="text" id="jbUrl" placeholder="YouTube link"><input type="text" id="jbTitle" maxlength="120" placeholder="Title"><button class="btn primary small" id="jbAdd">Queue it</button>' +
+      (np ? '<button class="btn ghost small" id="jbNext">⏭ Skip (DJ / mod)</button>' : '') + '</div>';
+  }
+  html += '</div>';
+  slot.innerHTML = html;
+  slot.querySelectorAll('[data-jb-vote]').forEach((b) => b.onclick = async () => {
+    if (!state.me) return toast('Sign in to vote.');
+    try { const d = await api('/api/jukebox/' + b.dataset.jbVote + '/vote', { method: 'POST' }); renderJukebox(d); } catch (e) { toast(e.message); }
+  });
+  slot.querySelectorAll('[data-jb-del]').forEach((b) => b.onclick = async () => {
+    try { const d = await api('/api/jukebox/' + b.dataset.jbDel, { method: 'DELETE' }); renderJukebox(d); } catch (e) { toast(e.message); }
+  });
+  const add = $('#jbAdd');
+  if (add) add.onclick = async () => {
+    try {
+      const d = await api('/api/jukebox', { method: 'POST', body: { youtube: $('#jbUrl').value, title: $('#jbTitle').value } });
+      renderJukebox(d);
+      toast('Queued! 🎧');
+    } catch (e) { toast(e.message); }
+  };
+  const next = $('#jbNext');
+  if (next) next.onclick = async () => {
+    try { const d = await api('/api/jukebox/next', { method: 'POST' }); renderJukebox(d); } catch (e) { toast(e.message); }
+  };
 }
 
 function reactionsHtml(p) {
@@ -191,8 +295,9 @@ function postHtml(p, isSpotlight) {
     ? '<div class="gifts-line">🎁 ' + p.gifts.map((g) => esc(g.emoji) + ' from ' + esc(g.from ? g.from.displayName : 'someone')).join(' · ') + '</div>' : '';
   return '<article class="card post' + (isSpotlight || p.spotlight ? ' spotlight' : '') + '" id="post-' + p.id + '">' +
     (isSpotlight || p.spotlight ? '<div class="spotlight-tag">👑 FOUNDER SPOTLIGHT</div>' : '') +
+    (p.crowned ? '<div class="spotlight-tag">👑 CLIP BATTLE CHAMPION</div>' : '') +
     '<div class="post-head"><div>' + authorHtml(p.author) + '</div><span class="post-time">' + fmtTime(p.createdAt) + '</span></div>' +
-    (p.text ? '<div class="post-text">' + esc(p.text) + '</div>' : '') +
+    (p.text ? '<div class="post-text">' + richText(p.text) + '</div>' : '') +
     (p.image ? '<img class="post-img" src="' + esc(p.image) + '" alt="post image">' : '') +
     (p.youtubeId ? '<iframe class="yt-frame" src="https://www.youtube-nocookie.com/embed/' + esc(p.youtubeId) + '" allowfullscreen title="video"></iframe>' : '') +
     gifts +
@@ -207,7 +312,7 @@ function postHtml(p, isSpotlight) {
       state.gifts.map((g) => '<button class="gift-btn" data-gift="' + g.emoji + '" data-post="' + p.id + '">' + g.emoji + ' ' + esc(g.name) + ' · ' + g.price + '🪙</button>').join('') +
     '</div>' +
     '<div class="comments">' +
-      p.comments.map((c) => '<div class="comment">' + authorHtml(c.author) + ' — ' + esc(c.text) + '</div>').join('') +
+      p.comments.map((c) => '<div class="comment">' + authorHtml(c.author) + ' — ' + richText(c.text) + '</div>').join('') +
       (state.me ? '<form class="comment-form" data-post="' + p.id + '"><input type="text" maxlength="600" placeholder="Add a comment…"><button class="btn primary small" type="submit">Reply</button></form>' : '') +
     '</div></article>';
 }
@@ -344,7 +449,7 @@ function renderChat(messages) {
 }
 function chatMsgHtml(m) {
   return '<div class="chat-msg" id="msg-' + m.id + '">' + authorHtml(m.author) +
-    '<span class="post-time">' + fmtTime(m.createdAt) + '</span><br>' + esc(m.text) + '</div>';
+    '<span class="post-time">' + fmtTime(m.createdAt) + '</span><br>' + richText(m.text) + '</div>';
 }
 function connectSocket() {
   if (state.socket) { state.socket.disconnect(); }
@@ -362,7 +467,29 @@ function connectSocket() {
     const el = $('#msg-' + data.messageId);
     if (el) el.remove();
   });
+  socket.on('dm:new', (data) => {
+    if (state.dmPartner === data.from.id && !$('#view-messages').hidden) {
+      const box = $('#dmMessages');
+      box.insertAdjacentHTML('beforeend', dmMsgHtml({ ...data.message, mine: false }));
+      box.scrollTop = box.scrollHeight;
+      api('/api/dms/' + data.from.id).catch(() => {}); // mark read
+    } else {
+      setDmUnread(state.dmUnread + 1);
+      toast('✉️ ' + data.from.displayName + ': ' + data.message.text.slice(0, 60));
+    }
+    if (!$('#view-messages').hidden && state.dmPartner !== data.from.id) loadDmList();
+  });
+  socket.on('howl:update', (data) => {
+    $('#howlTotal').textContent = data.total;
+    $('#howlToday').textContent = data.today;
+  });
+  socket.on('howl:mine', (data) => {
+    $('#howlMine').textContent = data.total;
+    $('#howlStreak').textContent = data.streak;
+    badgeToasts(data.newBadges);
+  });
   initLoungeSocket(socket);
+  initPartySocket(socket);
 }
 $('#chatForm').addEventListener('submit', (ev) => {
   ev.preventDefault();
@@ -385,6 +512,10 @@ $$('.side-nav button').forEach((b) => b.addEventListener('click', () => {
   if (b.dataset.nav === 'lfg') loadLfg();
   if (b.dataset.nav === 'members') loadMembers();
   if (b.dataset.nav === 'console') loadConsole();
+  if (b.dataset.nav === 'messages') loadDmList();
+  if (b.dataset.nav === 'watchparty') openParty();
+  if (b.dataset.nav === 'battles') loadBattles();
+  if (b.dataset.nav === 'ideas') loadIdeas();
 }));
 
 /* ---------------- pack view ---------------- */
@@ -404,6 +535,11 @@ function renderVibes() {
         badgeToasts(data.newBadges);
         $('#vibeStatus').textContent = 'Today: ' + v + ' 🌙 (+3 Howl Coins)';
         toast('Vibe checked in: ' + v);
+        if (data.streak) {
+          state.me.streak = data.streak.streak;
+          state.me.streakBest = data.streak.best;
+          if (data.streak.bonus > 0) toast('🔥 ' + data.streak.milestone + '-day streak milestone: +' + data.streak.bonus + ' 🪙!');
+        }
       } catch (e) { toast(e.message); }
     };
     row.appendChild(b);
@@ -456,11 +592,16 @@ async function loadPack() {
   const me = state.me;
   $('#myRank').innerHTML = '<div class="rank-big">' + esc(me.rank.icon) + ' ' + esc(me.rank.name) + '</div>' +
     '<p class="muted">' + me.points + ' lifetime points · ' + (me.weeklyPoints || 0) + ' this week · 🪙 ' + me.coins + ' Howl Coins' +
-    (me.rank.next ? ' · next rank at ' + me.rank.next + ' points' : ' · top rank — lead the pack 👑') + '</p>';
+    (me.rank.next ? ' · next rank at ' + me.rank.next + ' points' : ' · top rank — lead the pack 👑') + '<br>' +
+    '🔥 Login streak: <b>' + (me.streak || 0) + ' days</b> (best ' + (me.streakBest || 0) + ') · 🐺 ' + (me.howls ? me.howls.total : 0) + ' howls · 🌟 ' + (me.kudosReceived || 0) + ' kudos received</p>';
   $('#badgeCase').innerHTML = state.badgesMeta.map((b) => {
     const owned = me.badges.includes(b.id);
     return '<div class="badge-item' + (owned ? '' : ' locked') + '"><span class="b-icon">' + b.icon + '</span>' + esc(b.name) + '<br><span>' + esc(b.desc) + '</span></div>';
   }).join('');
+  initProfileEdit();
+  loadMyEmotes();
+  renderEmoteBar();
+  loadHowl();
 }
 
 /* ---------------- arcade ---------------- */
@@ -550,6 +691,389 @@ $('#lfgBtn').addEventListener('click', async () => {
     $('#lfgGame').value = ''; $('#lfgText').value = '';
     badgeToasts(data.newBadges);
     loadLfg();
+  } catch (e) { toast(e.message); }
+});
+
+/* ---------------- the Pack Howl ---------------- */
+async function loadHowl() {
+  try {
+    const data = await api('/api/howl');
+    $('#howlTotal').textContent = data.total;
+    $('#howlToday').textContent = data.today;
+    if (data.mine) {
+      $('#howlMine').textContent = data.mine.total;
+      $('#howlStreak').textContent = data.mine.streak;
+    }
+  } catch (e) { /* howl is decorative until signed in */ }
+}
+$('#howlBtn').addEventListener('click', () => {
+  if (!state.me) return toast('Sign in to howl with the pack.');
+  if (!state.socket) return toast('Connecting… try again in a second.');
+  state.socket.emit('howl:press');
+  const btn = $('#howlBtn');
+  btn.classList.remove('howled'); void btn.offsetWidth; btn.classList.add('howled');
+});
+
+/* ---------------- direct messages ---------------- */
+function dmMsgHtml(m) {
+  return '<div class="dm-msg' + (m.mine ? ' mine' : '') + '">' + richText(m.text) +
+    '<span class="post-time">' + fmtTime(m.createdAt) + '</span></div>';
+}
+async function loadDmList() {
+  const box = $('#dmList');
+  if (!state.me) { box.innerHTML = '<p class="muted">Sign in to message the pack.</p>'; return; }
+  try {
+    const data = await api('/api/dms');
+    setDmUnread(data.unread);
+    box.innerHTML = data.conversations.length ? '' : '<p class="muted">No conversations yet — open a member profile and hit Message.</p>';
+    for (const c of data.conversations) {
+      const row = document.createElement('div');
+      row.className = 'member-row';
+      row.innerHTML = '<span>' + authorHtml(c.user) + (c.last ? '<br><span class="muted">' + (c.last.mine ? 'You: ' : '') + esc(c.last.text.slice(0, 60)) + '</span>' : '') + '</span>' +
+        (c.unread ? '<span class="nav-badge">' + c.unread + '</span>' : '');
+      const btn = document.createElement('button');
+      btn.className = 'btn ghost small';
+      btn.textContent = 'Open';
+      btn.onclick = () => openDmThread(c.user.id);
+      row.appendChild(btn);
+      box.appendChild(row);
+    }
+  } catch (e) { toast(e.message); }
+}
+async function openDmThread(userId) {
+  try {
+    const data = await api('/api/dms/' + userId);
+    state.dmPartner = userId;
+    $('#dmThreadCard').hidden = false;
+    $('#dmThreadTitle').innerHTML = '✉️ ' + authorHtml(data.user);
+    const box = $('#dmMessages');
+    box.innerHTML = data.messages.map(dmMsgHtml).join('') || '<p class="muted">No messages yet — say hey 🐺</p>';
+    box.scrollTop = box.scrollHeight;
+    const me = await api('/api/me');
+    setDmUnread(me.dmUnread);
+  } catch (e) { toast(e.message); }
+}
+$('#dmForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const input = $('#dmInput');
+  if (!state.dmPartner || !input.value.trim()) return;
+  try {
+    const data = await api('/api/dms/' + state.dmPartner, { method: 'POST', body: { text: input.value } });
+    input.value = '';
+    const box = $('#dmMessages');
+    box.insertAdjacentHTML('beforeend', dmMsgHtml(data.message));
+    box.scrollTop = box.scrollHeight;
+    loadDmList();
+  } catch (e) { toast(e.message); }
+});
+
+/* ---------------- watch party ---------------- */
+const wp = { localTime: 0, localStamp: 0, listening: false };
+function wpCommand(func, args) {
+  const frame = $('#wpFrame');
+  if (!frame || !frame.contentWindow) return;
+  frame.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args: args || [] }), '*');
+}
+function wpLocalPosition() {
+  const s = state.party.state;
+  if (!s) return 0;
+  return wp.localTime + (s.playing ? (Date.now() - wp.localStamp) / 1000 : 0);
+}
+function wpApplyState() {
+  const s = state.party.state;
+  const wrap = $('#wpPlayerWrap');
+  if (!s) {
+    $('#wpNow').textContent = 'Nothing is playing yet.';
+    wrap.hidden = true;
+    $('#wpControls').hidden = true;
+    return;
+  }
+  $('#wpNow').innerHTML = '🎬 <b>' + esc(s.title) + '</b> · hosted by ' + esc(s.hostName) +
+    (s.playing ? ' · ▶ playing' : ' · ⏸ paused');
+  $('#wpHostNote').textContent = state.party.canHost ? 'You have the remote 🎛️' : 'The host has the remote — sit back and enjoy 🍿';
+  $('#wpControls').hidden = !state.party.canHost;
+  const frame = $('#wpFrame');
+  const wantSrc = 'https://www.youtube-nocookie.com/embed/' + s.videoId + '?enablejsapi=1&rel=0';
+  if (!frame.src || !frame.src.includes(s.videoId)) {
+    wrap.hidden = false;
+    frame.src = wantSrc;
+    wp.localTime = s.position; wp.localStamp = Date.now();
+    setTimeout(() => {
+      frame.contentWindow && frame.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 'wp' }), '*');
+      if (s.playing) wpCommand('playVideo'); else wpCommand('pauseVideo');
+      wpCommand('seekTo', [s.position, true]);
+    }, 900);
+    return;
+  }
+  // Same video: correct drift and play state.
+  const drift = s.position - wpLocalPosition();
+  if (Math.abs(drift) > 2.5) wpCommand('seekTo', [s.position, true]);
+  wpCommand(s.playing ? 'playVideo' : 'pauseVideo');
+}
+function openParty() {
+  if (!state.me) { toast('Sign in to join the Watch Party.'); return; }
+  if (state.socket) state.socket.emit('party:join');
+  api('/api/party').then((d) => {
+    state.party.state = d.state;
+    state.party.canHost = d.canHost;
+    wpApplyState();
+  }).catch(() => {});
+}
+function initPartySocket(socket) {
+  socket.on('party:state', (data) => {
+    if (data.state !== undefined) state.party.state = data.state;
+    if (typeof data.canHost === 'boolean') state.party.canHost = data.canHost;
+    if (Array.isArray(data.chat)) {
+      $('#wpChat').innerHTML = data.chat.map((m) => '<div class="chat-msg">' + authorHtml(m.author) + '<br>' + richText(m.text) + '</div>').join('');
+    }
+    wpApplyState();
+  });
+  socket.on('party:chat', (data) => {
+    const box = $('#wpChat');
+    box.insertAdjacentHTML('beforeend', '<div class="chat-msg">' + authorHtml(data.message.author) + '<br>' + richText(data.message.text) + '</div>');
+    box.scrollTop = box.scrollHeight;
+  });
+}
+window.addEventListener('message', (e) => {
+  if (!/youtube(-nocookie)?\.com$/.test(new URL(e.origin || 'http://x').hostname)) return;
+  let data = null;
+  try { data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (err) { return; }
+  if (!data) return;
+  if (data.event === 'infoDelivery' && data.info) {
+    if (typeof data.info.currentTime === 'number') { wp.localTime = data.info.currentTime; wp.localStamp = Date.now(); }
+    if (typeof data.info.playerState === 'number' && state.party.canHost && state.party.state) {
+      // Host drove the player directly — relay it so the pack follows.
+      if (data.info.playerState === 1 && !state.party.state.playing) {
+        state.socket && state.socket.emit('party:control', { action: 'play', position: Math.round(wp.localTime) });
+      } else if (data.info.playerState === 2 && state.party.state.playing) {
+        state.socket && state.socket.emit('party:control', { action: 'pause', position: Math.round(wp.localTime) });
+      }
+    }
+  }
+});
+$('#wpSet').addEventListener('click', () => {
+  if (!state.me) return toast('Sign in first.');
+  if (!state.socket) return toast('Connecting…');
+  state.socket.emit('party:set', { youtube: $('#wpUrl').value, title: $('#wpTitle').value });
+  $('#wpUrl').value = ''; $('#wpTitle').value = '';
+  toast('Setting the party video… if a host already picked one, theirs stays. 🎬');
+});
+$('#wpPlay').addEventListener('click', () => state.socket && state.socket.emit('party:control', { action: 'play', position: Math.round(wpLocalPosition()) }));
+$('#wpPause').addEventListener('click', () => state.socket && state.socket.emit('party:control', { action: 'pause', position: Math.round(wpLocalPosition()) }));
+$('#wpBack').addEventListener('click', () => state.socket && state.socket.emit('party:control', { action: 'seek', position: Math.max(0, Math.round(wpLocalPosition()) - 10) }));
+$('#wpFwd').addEventListener('click', () => state.socket && state.socket.emit('party:control', { action: 'seek', position: Math.round(wpLocalPosition()) + 10 }));
+$('#wpChatForm').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const input = $('#wpChatInput');
+  if (!state.socket || !input.value.trim()) return;
+  state.socket.emit('party:chat', { text: input.value });
+  input.value = '';
+});
+
+/* ---------------- clip battles ---------------- */
+async function loadBattles() {
+  const list = $('#battleList');
+  try {
+    const data = await api('/api/battles');
+    list.innerHTML = data.battles.length ? '' : '<div class="card"><p class="muted">No battles yet. When two clips enter, one clip leaves with the crown 👑</p></div>';
+    for (const b of data.battles) list.appendChild(battleEl(b));
+    const createCard = $('#battleCreateCard');
+    if (state.me && state.me.role === 'founder') {
+      createCard.hidden = false;
+      const clips = state.channels.find((c) => c.name === 'Clips & Videos');
+      if (clips) {
+        const feed = await api('/api/channels/' + clips.id + '/feed');
+        const clipPosts = feed.posts.filter((p) => p.youtubeId);
+        const opts = clipPosts.map((p) => '<option value="' + p.id + '">' + esc((p.author ? p.author.displayName : '?') + ' — ' + (p.text || 'clip').slice(0, 40)) + '</option>').join('');
+        $('#battleA').innerHTML = opts;
+        $('#battleB').innerHTML = opts;
+      }
+    } else {
+      createCard.hidden = true;
+    }
+  } catch (e) { toast(e.message); }
+}
+function battleEl(b) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  const side = (s, label) => {
+    const p = s.post;
+    const isWinner = b.status === 'closed' && b.winnerPostId === s.postId;
+    return '<div class="battle-side' + (isWinner ? ' winner' : '') + '">' +
+      '<div class="spotlight-tag">' + label + (isWinner ? ' · 👑 WINNER' : '') + '</div>' +
+      (p && p.youtubeId ? '<iframe class="yt-frame" src="https://www.youtube-nocookie.com/embed/' + esc(p.youtubeId) + '" allowfullscreen title="battle clip"></iframe>' : '') +
+      '<p>' + (p ? authorHtml(p.author) + ' — ' + richText(p.text || '') : 'Clip removed') + '</p>' +
+      '<p><b>' + s.votes + ' votes</b></p>' +
+      (b.status === 'open' && state.me ? '<button class="btn ' + (b.myVote === s.postId ? 'gold' : 'primary') + ' small" data-battle-vote="' + b.id + '" data-post="' + s.postId + '">' + (b.myVote === s.postId ? '✓ Your pick' : 'Vote') + '</button>' : '') +
+      '</div>';
+  };
+  el.innerHTML = '<h3>⚔️ Round ' + b.round + ' — ' + (b.status === 'open' ? 'VOTING OPEN' : 'CLOSED') + ' · prize ' + b.prize + ' 🪙</h3>' +
+    '<div class="battle-grid">' + side(b.a, 'CLIP A') + side(b.b, 'CLIP B') + '</div>' +
+    (b.status === 'open' && state.me && state.me.role === 'founder'
+      ? '<button class="btn gold small" data-battle-close="' + b.id + '">Close &amp; crown the winner</button>' : '');
+  el.querySelectorAll('[data-battle-vote]').forEach((btn) => btn.onclick = async () => {
+    try { await api('/api/battles/' + btn.dataset.battleVote + '/vote', { method: 'POST', body: { postId: btn.dataset.post } }); loadBattles(); } catch (e) { toast(e.message); }
+  });
+  el.querySelectorAll('[data-battle-close]').forEach((btn) => btn.onclick = async () => {
+    try {
+      const d = await api('/api/battles/' + btn.dataset.battleClose + '/close', { method: 'POST', body: {} });
+      toast('👑 Winner crowned! Prize paid: ' + d.battle.prize + ' 🪙');
+      loadBattles();
+    } catch (e) { toast(e.message + ' (Tip: on a tie, the Founder picks — try again and it will still need a pick.)'); }
+  });
+  return el;
+}
+$('#battleCreate').addEventListener('click', async () => {
+  try {
+    await api('/api/battles', {
+      method: 'POST',
+      body: { postAId: $('#battleA').value, postBId: $('#battleB').value, prize: parseInt($('#battlePrize').value, 10) || 25 },
+    });
+    toast('Battle started! ⚔️');
+    loadBattles();
+  } catch (e) { toast(e.message); }
+});
+
+/* ---------------- suggestion box ---------------- */
+async function loadIdeas() {
+  $('#ideaFormCard').hidden = !state.me;
+  const list = $('#ideaList');
+  try {
+    const data = await api('/api/suggestions');
+    list.innerHTML = data.suggestions.length ? '' : '<div class="card"><p class="muted">The box is empty. Be the first to shape Vantahowl. 💡</p></div>';
+    for (const s of data.suggestions) {
+      const el = document.createElement('div');
+      el.className = 'card idea-row';
+      const chip = { open: '🆕 Open', planned: '🛠️ Planned', done: '✅ Done', dismissed: '🗄️ Dismissed' }[s.status] || s.status;
+      el.innerHTML = '<div class="post-head"><div>' + authorHtml(s.author) + '</div><span class="idea-chip">' + chip + '</span></div>' +
+        '<div class="post-text">' + richText(s.text) + '</div>';
+      const actions = document.createElement('div');
+      actions.className = 'post-actions';
+      if (state.me) {
+        const vote = document.createElement('button');
+        vote.className = 'btn ' + (s.mine ? 'gold' : 'ghost') + ' small';
+        vote.textContent = '▲ ' + s.votes;
+        vote.onclick = async () => { try { await api('/api/suggestions/' + s.id + '/vote', { method: 'POST' }); loadIdeas(); } catch (e) { toast(e.message); } };
+        actions.appendChild(vote);
+      } else {
+        actions.innerHTML = '<span class="muted">▲ ' + s.votes + '</span>';
+      }
+      if (state.me && state.me.role === 'founder') {
+        for (const st of ['planned', 'done', 'dismissed', 'open']) {
+          if (st === s.status) continue;
+          const b = document.createElement('button');
+          b.className = 'btn ghost small';
+          b.textContent = 'Mark ' + st;
+          b.onclick = async () => { try { await api('/api/admin/suggestions/' + s.id, { method: 'PATCH', body: { status: st } }); loadIdeas(); } catch (e) { toast(e.message); } };
+          actions.appendChild(b);
+        }
+      }
+      el.appendChild(actions);
+      list.appendChild(el);
+    }
+  } catch (e) { toast(e.message); }
+}
+$('#ideaBtn').addEventListener('click', async () => {
+  try {
+    await api('/api/suggestions', { method: 'POST', body: { text: $('#ideaText').value } });
+    $('#ideaText').value = '';
+    toast('Idea dropped in the box 💡');
+    loadIdeas();
+  } catch (e) { toast(e.message); }
+});
+
+/* ---------------- emotes ---------------- */
+function renderEmoteBar() {
+  const bar = $('#emoteBar');
+  bar.innerHTML = state.emotes.map((e) =>
+    '<button class="emote-btn" data-emote=":' + esc(e.name) + ':" title=":' + esc(e.name) + ':"><img class="emote-img" src="' + esc(e.image) + '" alt=":' + esc(e.name) + ':"></button>').join('');
+  bar.querySelectorAll('[data-emote]').forEach((b) => b.onclick = () => {
+    const input = $('#chatInput');
+    input.value = (input.value + ' ' + b.dataset.emote + ' ').slice(0, 500);
+    input.focus();
+  });
+  const gallery = $('#emoteGallery');
+  if (gallery) {
+    gallery.innerHTML = state.emotes.map((e) =>
+      '<span class="emote-chip"><img class="emote-img" src="' + esc(e.image) + '" alt=""> :' + esc(e.name) + ':</span>').join('') ||
+      '<span class="muted">No approved emotes yet.</span>';
+  }
+}
+async function uploadImageFile(file) {
+  const fd = new FormData();
+  fd.append('image', file);
+  const res = await fetch('/api/upload', { method: 'POST', credentials: 'same-origin', headers: { 'x-csrf-token': state.csrf }, body: fd });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Upload failed');
+  return data.url;
+}
+$('#emoteFile').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  try {
+    state.emoteUploadUrl = await uploadImageFile(file);
+    $('#emoteFileName').textContent = '✓ ' + file.name;
+  } catch (e) { toast(e.message); }
+});
+$('#emoteSubmit').addEventListener('click', async () => {
+  if (!state.emoteUploadUrl) return toast('Pick an image first.');
+  try {
+    await api('/api/emotes', { method: 'POST', body: { name: $('#emoteName').value, image: state.emoteUploadUrl } });
+    $('#emoteName').value = ''; $('#emoteFileName').textContent = ''; state.emoteUploadUrl = null;
+    toast('Emote submitted — a mod will review it 😀');
+    loadPack();
+  } catch (e) { toast(e.message); }
+});
+async function loadMyEmotes() {
+  if (!state.me) return;
+  try {
+    const data = await api('/api/emotes');
+    $('#emoteMine').innerHTML = data.mine.length
+      ? '<h4>Your submissions</h4>' + data.mine.map((e) =>
+          '<span class="emote-chip"><img class="emote-img" src="' + esc(e.image) + '" alt=""> :' + esc(e.name) + ': · ' + esc(e.status) + '</span>').join('')
+      : '';
+  } catch (e) { /* optional */ }
+}
+
+/* ---------------- profile glow-up editing ---------------- */
+function initProfileEdit() {
+  const card = $('#profileEditCard');
+  if (!state.me) { card.hidden = true; $('#emoteCard').hidden = true; return; }
+  card.hidden = false;
+  $('#emoteCard').hidden = false;
+  $('#peDisplay').value = state.me.displayName;
+  $('#peStatus').value = state.me.statusLine || '';
+  $('#pePlaying').value = state.me.nowPlaying || '';
+  $('#peAccent').value = state.me.accent || '#E1062C';
+  state.bannerUrl = state.me.banner || '';
+  $('#peBannerName').textContent = state.me.banner ? 'Banner set ✓' : '';
+}
+$('#peBannerFile').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  try {
+    state.bannerUrl = await uploadImageFile(file);
+    $('#peBannerName').textContent = '✓ ' + file.name;
+  } catch (e) { toast(e.message); }
+});
+$('#peBannerClear').addEventListener('click', () => {
+  state.bannerUrl = '';
+  $('#peBannerName').textContent = 'Banner will be cleared on save';
+});
+$('#peSave').addEventListener('click', async () => {
+  try {
+    const data = await api('/api/me', {
+      method: 'PATCH',
+      body: {
+        displayName: $('#peDisplay').value, statusLine: $('#peStatus').value,
+        nowPlaying: $('#pePlaying').value, accent: $('#peAccent').value,
+        banner: state.bannerUrl,
+      },
+    });
+    state.me = data.user;
+    renderHeader();
+    toast('Profile glowing ✨');
+    loadPack();
   } catch (e) { toast(e.message); }
 });
 
@@ -664,10 +1188,15 @@ async function showProfile(userId) {
     $('#profileName').innerHTML = authorHtml(u);
     const s = u.stats || {};
     $('#profileBody').innerHTML =
+      (u.banner ? '<img class="profile-banner" src="' + esc(u.banner) + '" alt="">' : '') +
       '<p class="muted">' + esc(u.statusLine || '') + '</p>' +
+      (u.nowPlaying ? '<p class="now-playing-big">🎮 Now playing: ' + esc(u.nowPlaying) + '</p>' : '') +
       '<p>Posts: ' + (s.posts || 0) + ' · Comments: ' + (s.comments || 0) + ' · Chat: ' + (s.chats || 0) + ' · Gifts sent: ' + (s.giftsSent || 0) + '</p>' +
+      '<p>🌟 Kudos received: <b>' + (u.kudosReceived || 0) + '</b> · Kudos given: ' + (s.kudosGiven || 0) + '</p>' +
       '<div class="badge-case">' + state.badgesMeta.filter((b) => u.badges.includes(b.id)).map((b) => '<div class="badge-item"><span class="b-icon">' + b.icon + '</span>' + esc(b.name) + '</div>').join('') + '</div>' +
       (state.me && state.me.id !== u.id ? '<div class="post-actions">' +
+        '<button class="btn primary small" id="dmBtn">✉️ Message</button>' +
+        '<button class="btn gold small" id="kudosBtn">🌟 Kudos (' + (state.me.kudosLeft != null ? state.me.kudosLeft : 3) + ' left)</button>' +
         state.gifts.map((g) => '<button class="gift-btn" data-direct-gift="' + g.emoji + '" data-user="' + u.id + '">' + g.emoji + ' ' + g.price + '🪙</button>').join('') +
         '<button class="btn ghost small" id="blockBtn">🚫 Block</button></div>' : '');
     $$('#profileBody [data-direct-gift]').forEach((b) => b.onclick = async () => {
@@ -678,6 +1207,22 @@ async function showProfile(userId) {
         toast('Gift sent! 🎁');
       } catch (e) { toast(e.message); }
     });
+    const dmBtn = $('#dmBtn');
+    if (dmBtn) dmBtn.onclick = () => {
+      $('#profileCard').hidden = true;
+      document.querySelector('[data-nav="messages"]').click();
+      openDmThread(u.id);
+    };
+    const kudosBtn = $('#kudosBtn');
+    if (kudosBtn) kudosBtn.onclick = async () => {
+      try {
+        const d = await api('/api/users/' + u.id + '/kudos', { method: 'POST' });
+        if (state.me) state.me.kudosLeft = d.kudosLeft;
+        badgeToasts(d.newBadges);
+        toast('🌟 Kudos sent! ' + u.displayName + ' now has ' + d.kudosReceived + '.');
+        showProfile(u.id);
+      } catch (e) { toast(e.message); }
+    };
     const blockBtn = $('#blockBtn');
     if (blockBtn) blockBtn.onclick = async () => {
       try { await api('/api/blocks', { method: 'POST', body: { userId: u.id } }); toast('Blocked — their posts and chat are hidden for you.'); loadFeed(); } catch (e) { toast(e.message); }
@@ -706,6 +1251,9 @@ async function loadConsole() {
       $('#setAnnouncement').value = s.announcement || '';
       $('#setSignupsOpen').checked = !!s.signupsOpen;
       $('#setProfanity').checked = !!s.profanityMask;
+      $('#setLiveManual').checked = !!s.liveManual;
+      renderEventAdmin();
+      loadEmoteAdmin();
       $('#setGnLabel').value = s.gameNight ? s.gameNight.label : '';
       $('#setGnAt').value = s.gameNight ? toLocalInput(s.gameNight.at) : '';
       $('#setSodTitle').value = s.songOfDay ? s.songOfDay.title : '';
@@ -776,8 +1324,14 @@ function renderChannelAdmin() {
     for (const c of data.channels) {
       const row = document.createElement('div');
       row.className = 'admin-row';
-      row.innerHTML = '<span>' + esc(c.emoji) + ' <b>' + esc(c.name) + '</b>' + (c.hidden ? ' <span class="muted">(hidden)</span>' : '') + '</span>';
+      row.innerHTML = '<span>' + esc(c.emoji) + ' <b>' + esc(c.name) + '</b>' + (c.hidden ? ' <span class="muted">(hidden)</span>' : '') + (c.gate === '21+' ? ' <span class="muted">(21+)</span>' : '') + '</span>';
       const wrap = document.createElement('span');
+      const gate = document.createElement('button');
+      gate.className = 'btn ghost small'; gate.textContent = c.gate === '21+' ? 'Remove 21+ gate' : 'Make 21+';
+      gate.onclick = async () => {
+        try { await api('/api/admin/channels/' + c.id, { method: 'PATCH', body: { gate: c.gate === '21+' ? null : '21+' } }); refreshChannels(); renderChannelAdmin(); } catch (e) { toast(e.message); }
+      };
+      wrap.appendChild(gate);
       const rename = document.createElement('button');
       rename.className = 'btn ghost small'; rename.textContent = 'Rename';
       rename.onclick = async () => {
@@ -827,6 +1381,7 @@ $('#settingsSave').addEventListener('click', async () => {
     announcement: $('#setAnnouncement').value,
     signupsOpen: $('#setSignupsOpen').checked,
     profanityMask: $('#setProfanity').checked,
+    liveManual: $('#setLiveManual').checked,
     gameNight: gnAt ? { label: $('#setGnLabel').value, at: new Date(gnAt).toISOString() } : null,
     songOfDay: sodUrl ? { title: $('#setSodTitle').value, youtube: sodUrl } : null,
   };
@@ -834,9 +1389,90 @@ $('#settingsSave').addEventListener('click', async () => {
     const data = await api('/api/admin/settings', { method: 'PATCH', body });
     state.settings = { ...state.settings, ...data.settings };
     applySettings();
+    const bootData = await api('/api/bootstrap');
+    state.live = bootData.live;
+    applyLive();
     toast('Settings saved 👑');
   } catch (e) { toast(e.message); }
 });
+$('#liveCheckBtn').addEventListener('click', async () => {
+  try {
+    const data = await api('/api/admin/live-check', { method: 'POST' });
+    state.live = data.live;
+    applyLive();
+    $('#liveStatus').textContent = data.live.checkedAt
+      ? 'Last check: ' + new Date(data.live.checkedAt).toLocaleTimeString() + ' — ' +
+        (data.live.ok ? (data.live.isLive ? 'Kick says LIVE 🔴' : 'Kick reachable, not live') : 'Kick API did not answer (manual toggle still works)')
+      : 'No check yet.';
+  } catch (e) { toast(e.message); }
+});
+
+/* Console: events admin */
+async function renderEventAdmin() {
+  const box = $('#eventAdminList');
+  try {
+    const data = await api('/api/events');
+    box.innerHTML = data.events.length ? '' : '<p class="muted">No events yet.</p>';
+    for (const e of data.events) {
+      const row = document.createElement('div');
+      row.className = 'admin-row';
+      row.innerHTML = '<span><b>' + esc(e.title) + '</b> <span class="muted">' + esc(e.kind) + ' · ' +
+        new Date(e.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' · ' + e.going + ' going</span></span>';
+      const del = document.createElement('button');
+      del.className = 'btn ghost small';
+      del.textContent = 'Delete';
+      del.onclick = async () => { try { await api('/api/events/' + e.id, { method: 'DELETE' }); renderEventAdmin(); } catch (err) { toast(err.message); } };
+      row.appendChild(del);
+      box.appendChild(row);
+    }
+  } catch (e) { /* founder only */ }
+}
+$('#evCreate').addEventListener('click', async () => {
+  const at = $('#evAt').value;
+  if (!at) return toast('Pick a date and time.');
+  try {
+    await api('/api/events', {
+      method: 'POST',
+      body: { title: $('#evTitle').value, kind: $('#evKind').value, at: new Date(at).toISOString(), description: $('#evDesc').value },
+    });
+    $('#evTitle').value = ''; $('#evDesc').value = ''; $('#evAt').value = '';
+    toast('Event created 📅');
+    renderEventAdmin();
+  } catch (e) { toast(e.message); }
+});
+
+/* Console: emote approval queue */
+async function loadEmoteAdmin() {
+  const box = $('#emoteAdminList');
+  try {
+    const data = await api('/api/admin/emotes');
+    box.innerHTML = data.pending.length ? '' : '<p class="muted">No emotes waiting. 😴</p>';
+    for (const e of data.pending) {
+      const row = document.createElement('div');
+      row.className = 'admin-row';
+      row.innerHTML = '<span><img class="emote-img" src="' + esc(e.image) + '" alt=""> <b>:' + esc(e.name) + ':</b> <span class="muted">by ' + esc(e.author ? e.author.displayName : '?') + '</span></span>';
+      const wrap = document.createElement('span');
+      const ok = document.createElement('button');
+      ok.className = 'btn gold small'; ok.textContent = 'Approve';
+      ok.onclick = async () => {
+        try {
+          await api('/api/admin/emotes/' + e.id + '/approve', { method: 'POST' });
+          const bootData = await api('/api/bootstrap');
+          state.emotes = bootData.emotes || [];
+          renderEmoteBar();
+          loadEmoteAdmin();
+          toast('Emote approved 😀');
+        } catch (err) { toast(err.message); }
+      };
+      const no = document.createElement('button');
+      no.className = 'btn ghost small'; no.textContent = 'Reject';
+      no.onclick = async () => { try { await api('/api/emotes/' + e.id, { method: 'DELETE' }); loadEmoteAdmin(); } catch (err) { toast(err.message); } };
+      wrap.append(ok, no);
+      row.appendChild(wrap);
+      box.appendChild(row);
+    }
+  } catch (e) { /* staff only */ }
+}
 $('#gnClear').addEventListener('click', () => { $('#setGnAt').value = ''; $('#setGnLabel').value = ''; });
 $('#sodClear').addEventListener('click', () => { $('#setSodUrl').value = ''; $('#setSodTitle').value = ''; });
 
@@ -863,6 +1499,20 @@ function afterAuth(data) {
   renderVibes();
   loadFeed();
   toast('Welcome to Vantahowl, ' + data.user.displayName + ' 🐺');
+  if (data.streak && data.streak.streak > 1) {
+    toast('🔥 Login streak: ' + data.streak.streak + ' days' +
+      (data.streak.bonus > 0 ? ' — milestone bonus +' + data.streak.bonus + ' 🪙!' : ''));
+    if (data.streak.bonus > 0) setCoins(data.user.coins);
+  }
+  // Refresh per-user bits (emotes, live state, DM unread) without a second socket.
+  api('/api/bootstrap').then((b) => {
+    state.emotes = b.emotes || [];
+    state.live = b.live || null;
+    applyLive();
+    setDmUnread(b.dmUnread || 0);
+    renderEmoteBar();
+    loadHowl();
+  }).catch(() => {});
 }
 $('#loginForm').addEventListener('submit', async (ev) => {
   ev.preventDefault();

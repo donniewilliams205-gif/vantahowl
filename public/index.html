@@ -28,6 +28,10 @@
   </div>
 </header>
 
+<a class="live-banner" id="liveBanner" href="https://kick.com/bludhound420" target="_blank" rel="noopener" hidden>
+  🔴 HOUNDY IS LIVE ON KICK — tap to watch the stream! 🐺
+</a>
+
 <section class="hero">
   <div class="moon" aria-hidden="true"></div>
   <div class="hero-inner">
@@ -47,9 +51,13 @@
     <nav class="side-nav">
       <button data-nav="feed" class="active">🏠 Den Feed</button>
       <button data-nav="pack">🐺 The Pack</button>
+      <button data-nav="messages">✉️ Messages <span class="nav-badge" id="dmBadge" hidden>0</span></button>
+      <button data-nav="watchparty">🎬 Watch Party</button>
+      <button data-nav="battles">⚔️ Clip Battles</button>
       <button data-nav="arcade">🕹️ Arcade</button>
       <button data-nav="lfg">🎯 Squad Up</button>
       <button data-nav="lounge">🎤 Voice &amp; Video</button>
+      <button data-nav="ideas">💡 Idea Box</button>
       <button data-nav="members">👥 Members</button>
       <button data-nav="console" id="consoleNav" hidden>👑 Console</button>
     </nav>
@@ -60,8 +68,10 @@
   <section class="content">
     <!-- FEED -->
     <div class="view" id="view-feed">
+      <div id="lobbySlot"></div>
       <div id="spotlightSlot"></div>
       <div id="songSlot"></div>
+      <div id="jukeboxSlot"></div>
       <div class="composer card" id="composer" hidden>
         <textarea id="postText" rows="3" maxlength="2000" placeholder="Howl something to the pack…"></textarea>
         <div class="composer-row">
@@ -86,6 +96,15 @@
 
     <!-- PACK -->
     <div class="view" id="view-pack" hidden>
+      <div class="card howl-card">
+        <h3>🌕 The Pack Howl</h3>
+        <p class="muted">One button. The whole pack. Howl loud and keep the streak alive.</p>
+        <button class="btn howl-btn" id="howlBtn">🐺 HOWL!</button>
+        <p class="howl-stats">
+          Pack total: <b id="howlTotal">0</b> · Today: <b id="howlToday">0</b><br>
+          <span class="muted">Your howls: <b id="howlMine">0</b> · Howl streak: <b id="howlStreak">0</b> days 🔥</span>
+        </p>
+      </div>
       <div class="card" id="vibeCard">
         <h3>🌙 Daily Vibe Check-In</h3>
         <p class="muted">One tap a day. Earns Howl Coins and keeps the pack close.</p>
@@ -105,6 +124,30 @@
         <div id="myRank"></div>
         <h4>Trophy case</h4>
         <div id="badgeCase" class="badge-case"></div>
+      </div>
+      <div class="card" id="profileEditCard" hidden>
+        <h3>✨ Profile Glow-Up</h3>
+        <label>Display name <input type="text" id="peDisplay" maxlength="30"></label>
+        <label>Status line <input type="text" id="peStatus" maxlength="80" placeholder="e.g. Night owl, clip gremlin"></label>
+        <label>🎮 Now playing <input type="text" id="pePlaying" maxlength="60" placeholder="e.g. Warzone"></label>
+        <label>Accent color <input type="color" id="peAccent"></label>
+        <label class="btn ghost small file-label">🖼️ Upload banner<input type="file" id="peBannerFile" accept="image/*" hidden></label>
+        <span class="file-name" id="peBannerName"></span>
+        <button class="btn ghost small" id="peBannerClear">Clear banner</button>
+        <div><button class="btn primary" id="peSave">Save profile</button></div>
+      </div>
+      <div class="card" id="emoteCard" hidden>
+        <h3>😀 Pack Emotes</h3>
+        <p class="muted">Submit an emote for the pack. A mod approves it, then anyone can drop it in chat and posts as <code>:name:</code></p>
+        <div class="composer-row">
+          <input type="text" id="emoteName" maxlength="24" placeholder="emote_name">
+          <label class="btn ghost small file-label">📸 Image<input type="file" id="emoteFile" accept="image/*" hidden></label>
+          <span class="file-name" id="emoteFileName"></span>
+          <button class="btn primary small" id="emoteSubmit">Submit</button>
+        </div>
+        <div id="emoteMine"></div>
+        <h4>Pack emotes</h4>
+        <div id="emoteGallery" class="emote-gallery"></div>
       </div>
     </div>
 
@@ -138,6 +181,67 @@
       <div id="lfgList"></div>
     </div>
 
+    <!-- MESSAGES -->
+    <div class="view" id="view-messages" hidden>
+      <div class="card">
+        <h3>✉️ Direct Messages</h3>
+        <p class="muted">Private 1:1 chats with packmates. Blocked wolves can't message each other.</p>
+        <div id="dmList"></div>
+      </div>
+      <div class="card" id="dmThreadCard" hidden>
+        <h3 id="dmThreadTitle"></h3>
+        <div id="dmMessages" class="dm-messages"></div>
+        <form id="dmForm" class="chat-form">
+          <input type="text" id="dmInput" maxlength="1000" placeholder="Message…" autocomplete="off">
+          <button class="btn primary small" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- WATCH PARTY -->
+    <div class="view" id="view-watchparty" hidden>
+      <div class="card">
+        <h3>🎬 Watch Party</h3>
+        <p class="muted">One screen, the whole pack. The host (Founder, a mod, or whoever set the video) drives play, pause and seek — everyone else syncs along.</p>
+        <div id="wpNow" class="muted">Nothing is playing yet.</div>
+        <div class="wp-player" id="wpPlayerWrap" hidden>
+          <iframe id="wpFrame" class="yt-frame" src="" allow="autoplay; encrypted-media" allowfullscreen title="Watch Party"></iframe>
+        </div>
+        <div class="composer-row">
+          <input type="text" id="wpUrl" placeholder="YouTube link">
+          <input type="text" id="wpTitle" maxlength="120" placeholder="Title (optional)">
+          <button class="btn primary small" id="wpSet">Set video</button>
+        </div>
+        <div class="composer-row" id="wpControls" hidden>
+          <button class="btn ghost small" id="wpPlay">▶ Play</button>
+          <button class="btn ghost small" id="wpPause">⏸ Pause</button>
+          <button class="btn ghost small" id="wpBack">⏪ −10s</button>
+          <button class="btn ghost small" id="wpFwd">⏩ +10s</button>
+          <span class="muted tiny" id="wpHostNote"></span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>🍿 Party Chat</h3>
+        <div id="wpChat" class="dm-messages"></div>
+        <form id="wpChatForm" class="chat-form">
+          <input type="text" id="wpChatInput" maxlength="300" placeholder="React with the pack…" autocomplete="off">
+          <button class="btn primary small" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- CLIP BATTLES -->
+    <div class="view" id="view-battles" hidden>
+      <div class="card" id="battleCreateCard" hidden>
+        <h3>⚔️ Start a Clip Battle (Founder)</h3>
+        <label>Clip A <select id="battleA"></select></label>
+        <label>Clip B <select id="battleB"></select></label>
+        <label>Coin prize <input type="number" id="battlePrize" value="25" min="0" max="500"></label>
+        <button class="btn primary small" id="battleCreate">Start battle</button>
+      </div>
+      <div id="battleList"></div>
+    </div>
+
     <!-- LOUNGE -->
     <div class="view" id="view-lounge" hidden>
       <div class="card">
@@ -155,6 +259,17 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- IDEA BOX -->
+    <div class="view" id="view-ideas" hidden>
+      <div class="card" id="ideaFormCard" hidden>
+        <h3>💡 Suggestion Box</h3>
+        <input type="text" id="ideaText" maxlength="300" placeholder="What should Vantahowl do next?">
+        <button class="btn primary" id="ideaBtn">Drop it in the box</button>
+        <p class="muted">The pack upvotes. The Founder marks ideas planned, done, or dismissed.</p>
+      </div>
+      <div id="ideaList"></div>
     </div>
 
     <!-- MEMBERS -->
@@ -177,6 +292,8 @@
         <label>Announcement <input type="text" id="setAnnouncement" maxlength="300"></label>
         <label class="check"><input type="checkbox" id="setSignupsOpen"> Signups open</label>
         <label class="check"><input type="checkbox" id="setProfanity"> Profanity masking on</label>
+        <label class="check"><input type="checkbox" id="setLiveManual"> 🔴 "HOUNDY IS LIVE" banner (manual override)</label>
+        <div><button class="btn ghost small" id="liveCheckBtn">Check Kick now</button> <span class="muted tiny" id="liveStatus"></span></div>
         <label>Game Night label <input type="text" id="setGnLabel" maxlength="80" placeholder="Game Night in Vantahowl"></label>
         <label>Game Night date/time <input type="datetime-local" id="setGnAt"></label>
         <button class="btn ghost small" id="gnClear">Clear Game Night</button>
@@ -192,6 +309,21 @@
         <input type="text" id="newChanEmoji" maxlength="4" placeholder="Emoji">
         <input type="text" id="newChanTopic" maxlength="160" placeholder="Topic">
         <button class="btn primary small" id="chanCreate">Create channel</button>
+      </div>
+      <div class="card" id="eventsAdminCard">
+        <h3>📅 Events</h3>
+        <div id="eventAdminList"></div>
+        <input type="text" id="evTitle" maxlength="100" placeholder="Event title — e.g. Game Night: Warzone">
+        <label>Kind <select id="evKind">
+          <option>Game Night</option><option>Movie Night</option><option>Trivia</option><option>Stream</option><option>Other</option>
+        </select></label>
+        <label>When <input type="datetime-local" id="evAt"></label>
+        <input type="text" id="evDesc" maxlength="400" placeholder="Details (optional)">
+        <button class="btn primary small" id="evCreate">Create event</button>
+      </div>
+      <div class="card" id="emoteAdminCard">
+        <h3>😀 Emote Approvals</h3>
+        <div id="emoteAdminList"></div>
       </div>
       <div class="card">
         <h3>🛡️ Reports Queue</h3>
@@ -211,6 +343,7 @@
   <aside class="chat-panel card">
     <h3 class="chat-h">💬 Live Chat — <span id="chatChannelName">The Lobby</span></h3>
     <div id="chatMessages" class="chat-messages"></div>
+    <div id="emoteBar" class="emote-bar"></div>
     <form id="chatForm" class="chat-form">
       <input type="text" id="chatInput" maxlength="500" placeholder="Message the pack…" autocomplete="off">
       <button class="btn primary small" type="submit">Send</button>

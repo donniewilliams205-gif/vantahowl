@@ -10,6 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { io } = require('socket.io-client');
+const { QUESTIONS: TRIVIA_BANK } = require('../lib/trivia');
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 4123;
@@ -62,7 +63,10 @@ let serverProc = null;
 async function startServer() {
   serverProc = spawn('node', ['server.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), DATA_DIR, NODE_ENV: 'test' },
+    env: {
+      ...process.env, PORT: String(PORT), DATA_DIR, NODE_ENV: 'test',
+      TRIVIA_QUESTION_MS: '9000', TRIVIA_GAP_MS: '600',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   serverProc.stderr.on('data', (d) => process.stderr.write('[server] ' + d));
@@ -97,8 +101,8 @@ const founder = new Client();
 const alice = new Client();   // regular member
 const bob = new Client();     // regular member
 const ANON = new Client();
-let lobbyId, musicId, alicesPostId, bobsPostId, pollId;
-let aliceSocket = null, bobSocket = null;
+let lobbyId, musicId, clipsId, stonerId, alicesPostId, bobsPostId, pollId;
+let aliceSocket = null, bobSocket = null, founderSocket = null;
 
 async function main() {
   console.log('Vantahowl smoke suite — data dir: ' + DATA_DIR);
@@ -156,7 +160,10 @@ async function main() {
   const boot = await founder.get('/api/bootstrap');
   lobbyId = boot.data.channels.find((c) => c.name === 'The Lobby').id;
   musicId = boot.data.channels.find((c) => c.name === 'Music').id;
-  check('5 default channels seeded', boot.data.channels.length === 5);
+  clipsId = boot.data.channels.find((c) => c.name === 'Clips & Videos').id;
+  stonerId = boot.data.channels.find((c) => c.name === 'Stoner Lounge').id;
+  check('7 default channels seeded (incl. Pack Pets + Stoner Lounge)', boot.data.channels.length === 7);
+  check('Pack Pets channel seeded', boot.data.channels.some((c) => c.name === 'Pack Pets'));
 
   /* ---------- posts / comments / reactions ---------- */
   console.log('\n[content]');
@@ -464,12 +471,329 @@ async function main() {
     check('member denied log (403)', denied.status === 403);
   });
 
+  /* ---------- feature pack: age gate ---------- */
+  console.log('\n[feature pack: stoner lounge gate]');
+  let battleClipB = null;
+  await test('stoner lounge: hard 21+ server-side gate', async () => {
+    const teen = new Client();
+    const t = await teen.post('/api/signup', { username: 'teen_wolf', displayName: 'Teen', password: 'teenpass1234', dob: '2010-06-01' });
+    check('teen (16) signup ok', t.status === 201);
+    const teenBoot = await teen.get('/api/bootstrap');
+    check('teen cannot see Stoner Lounge in channel list', !teenBoot.data.channels.some((c) => c.id === stonerId));
+    const teenFeed = await teen.get('/api/channels/' + stonerId + '/feed');
+    check('teen feed request 404', teenFeed.status === 404);
+    const teenPost = await teen.post('/api/channels/' + stonerId + '/posts', { text: 'sneaking in' });
+    check('teen post attempt 404', teenPost.status === 404);
+    const twenty = new Client();
+    await twenty.post('/api/signup', { username: 'almost_21', displayName: 'Al', password: 'almostthere1', dob: '2006-01-15' });
+    const twentyBoot = await twenty.get('/api/bootstrap');
+    check('20-year-old also gated out', !twentyBoot.data.channels.some((c) => c.id === stonerId));
+    const adultFeed = await alice.get('/api/channels/' + stonerId + '/feed');
+    check('adult (28) can open Stoner Lounge', adultFeed.status === 200);
+    const adultPost = await alice.post('/api/channels/' + stonerId + '/posts', { text: 'mellow evening, pack 🌿' });
+    check('adult can post in Stoner Lounge', adultPost.status === 201);
+    const petsPost = await alice.post('/api/channels/' + boot.data.channels.find((c) => c.name === 'Pack Pets').id + '/posts', { text: 'my cat judges my aim' });
+    check('Pack Pets channel accepts posts', petsPost.status === 201);
+  });
+
+  /* ---------- feature pack: DMs ---------- */
+  console.log('\n[feature pack: dms]');
+  await test('direct messages: send, inbox, unread, read receipts', async () => {
+    const dmEvt = waitEvent(bobSocket, 'dm:new', (d) => d.message.text.includes('hello via dm'));
+    const sent = await alice.post('/api/dms/' + bob.userId, { text: 'hello via dm 🐺' });
+    check('dm send 201', sent.status === 201, JSON.stringify(sent.data));
+    const evt = await dmEvt;
+    check('recipient socket got dm:new', evt.from.username === 'luna_wolf');
+    const inbox = await bob.get('/api/dms');
+    check('inbox lists conversation with unread 1', inbox.data.conversations.length >= 1 && inbox.data.conversations[0].unread === 1);
+    check('inbox unread total 1', inbox.data.unread === 1);
+    const meUnread = await bob.get('/api/me');
+    check('/api/me reports dmUnread 1', meUnread.data.dmUnread === 1);
+    const thread = await bob.get('/api/dms/' + alice.userId);
+    check('thread has the message (not mine)', thread.data.messages.length === 1 && thread.data.messages[0].mine === false);
+    const inbox2 = await bob.get('/api/dms');
+    check('opening thread marks read (unread 0)', inbox2.data.unread === 0);
+    const self = await alice.post('/api/dms/' + alice.userId, { text: 'note to self' });
+    check('self-DM 400', self.status === 400);
+  });
+  await test('direct messages: blocked users cannot DM (either direction)', async () => {
+    await bob.post('/api/blocks', { userId: alice.userId });
+    const a2b = await alice.post('/api/dms/' + bob.userId, { text: 'you there?' });
+    check('blocked sender -> 403', a2b.status === 403);
+    const b2a = await bob.post('/api/dms/' + alice.userId, { text: 'reply attempt' });
+    check('blocker also cannot DM back -> 403', b2a.status === 403);
+    await bob.del('/api/blocks/' + alice.userId);
+    const ok = await alice.post('/api/dms/' + bob.userId, { text: 'unblocked, back to howling' });
+    check('DM works again after unblock', ok.status === 201);
+  });
+
+  /* ---------- feature pack: howl / profile / streak / kudos ---------- */
+  console.log('\n[feature pack: howl, profile, streak, kudos]');
+  await test('the Pack Howl: live counter, my total, streak', async () => {
+    const upd = waitEvent(bobSocket, 'howl:update', (d) => d.total >= 1);
+    aliceSocket.emit('howl:press');
+    const u1 = await upd;
+    check('howl broadcast to the pack', u1.today >= 1);
+    await sleep(400);
+    aliceSocket.emit('howl:press');
+    await sleep(400);
+    const state = await alice.get('/api/howl');
+    check('pack total counted both howls', state.data.total >= 2, 'total ' + state.data.total);
+    check('my howls = 2, streak = 1 day', state.data.mine.total === 2 && state.data.mine.streak === 1);
+  });
+  await test('profile glow-up: banner + now playing', async () => {
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.alloc(64, 9)]);
+    const fd = new FormData();
+    fd.append('image', new Blob([png], { type: 'image/png' }), 'banner.png');
+    const up = await alice.post('/api/upload', fd, { form: true });
+    check('banner upload ok', up.status === 201);
+    const patched = await alice.patch('/api/me', { banner: up.data.url, nowPlaying: 'Warzone' });
+    check('profile patch ok', patched.status === 200 && patched.data.user.nowPlaying === 'Warzone');
+    const prof = await bob.get('/api/users/' + alice.userId);
+    check('banner + nowPlaying visible on public profile', prof.data.user.banner === up.data.url && prof.data.user.nowPlaying === 'Warzone');
+    const bad = await alice.patch('/api/me', { banner: 'https://evil.example/x.png' });
+    check('external banner URL rejected (400)', bad.status === 400);
+  });
+  await test('login streak is tracked and returned', async () => {
+    const c = new Client();
+    const r = await c.post('/api/login', { username: 'luna_wolf', password: 'moonlight99' });
+    check('login ok', r.status === 200);
+    check('streak reported (>= 1 day)', r.data.streak && r.data.streak.streak >= 1, JSON.stringify(r.data.streak));
+    check('publicUser carries streak', r.data.user.streak >= 1);
+  });
+  await test('kudos: give, self-guard, weekly limit of 3, profile count', async () => {
+    const k1 = await alice.post('/api/users/' + bob.userId + '/kudos', {});
+    check('kudos 201, 2 left', k1.status === 201 && k1.data.targetKudos === 1 && k1.data.kudosLeft === 2, JSON.stringify(k1.data));
+    const self = await alice.post('/api/users/' + alice.userId + '/kudos', {});
+    check('self-kudos 400', self.status === 400);
+    await alice.post('/api/users/' + bob.userId + '/kudos', {});
+    const k3 = await alice.post('/api/users/' + bob.userId + '/kudos', {});
+    check('third kudos ok, 0 left', k3.status === 201 && k3.data.kudosLeft === 0);
+    const k4 = await alice.post('/api/users/' + founder.userId + '/kudos', {});
+    check('fourth kudos in a week -> 400', k4.status === 400);
+    const prof = await alice.get('/api/users/' + bob.userId);
+    check('kudos count shows on profile (3)', prof.data.user.kudosReceived === 3 && prof.data.user.stats.kudosReceived === 3);
+  });
+
+  /* ---------- feature pack: jukebox ---------- */
+  console.log('\n[feature pack: jukebox]');
+  await test('pack jukebox: queue, votes reorder, skip rules', async () => {
+    const add1 = await alice.post('/api/jukebox', { youtube: 'https://youtu.be/abc123XYZ09', title: 'Song A' });
+    check('add song 201, now playing', add1.status === 201 && add1.data.nowPlaying.youtubeId === 'abc123XYZ09', JSON.stringify(add1.data));
+    const dup = await alice.post('/api/jukebox', { youtube: 'abc123XYZ09', title: 'Song A again' });
+    check('duplicate song 400', dup.status === 400);
+    const add2 = await bob.post('/api/jukebox', { youtube: 'https://www.youtube.com/watch?v=def456UVW78', title: 'Song B' });
+    check('second song queued', add2.status === 201 && add2.data.queue.length === 2);
+    const jb = (await alice.get('/api/jukebox')).data;
+    const songA = jb.queue.find((j) => j.youtubeId === 'abc123XYZ09');
+    const songB = jb.queue.find((j) => j.youtubeId === 'def456UVW78');
+    await bob.post('/api/jukebox/' + songA.id + '/vote', {});
+    await alice.post('/api/jukebox/' + songB.id + '/vote', {});
+    let state = (await alice.get('/api/jukebox')).data;
+    check('tie 1-1 keeps the older song on top', state.nowPlaying.youtubeId === 'abc123XYZ09');
+    await bob.post('/api/jukebox/' + songB.id + '/vote', {});
+    state = (await alice.get('/api/jukebox')).data;
+    check('second vote promotes Song B to now playing', state.nowPlaying.youtubeId === 'def456UVW78' && state.nowPlaying.votes === 2);
+    const skipDenied = await alice.post('/api/jukebox/next', {});
+    check('non-author non-staff cannot skip (403)', skipDenied.status === 403);
+    const skipped = await bob.post('/api/jukebox/next', {});
+    check('author skips own now-playing song', skipped.status === 200 && skipped.data.nowPlaying.youtubeId === 'abc123XYZ09');
+    const clean = await founder.del('/api/jukebox/' + songA.id);
+    check('founder can clear the queue', clean.status === 200 && clean.data.queue.length === 0);
+  });
+
+  /* ---------- feature pack: clip battles ---------- */
+  console.log('\n[feature pack: clip battles]');
+  await test('clip battles: founder-run bracket round with crown + prize', async () => {
+    const clipA = await alice.post('/api/channels/' + clipsId + '/posts', { text: 'clip A', youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' });
+    const clipB = await bob.post('/api/channels/' + clipsId + '/posts', { text: 'clip B', youtube: 'https://www.youtube.com/watch?v=e-ORhEE9VVg' });
+    battleClipB = clipB.data.post.id;
+    const memberTry = await alice.post('/api/battles', { postAId: clipA.data.post.id, postBId: battleClipB, prize: 30 });
+    check('member cannot create a battle (403)', memberTry.status === 403);
+    const wrongChan = await founder.post('/api/battles', { postAId: bobsPostId, postBId: battleClipB, prize: 30 });
+    check('lobby post cannot battle (400)', wrongChan.status === 400);
+    const made = await founder.post('/api/battles', { postAId: clipA.data.post.id, postBId: battleClipB, prize: 30 });
+    check('battle created, round 1', made.status === 201 && made.data.battle.round === 1 && made.data.battle.status === 'open', JSON.stringify(made.data));
+    const second = await founder.post('/api/battles', { postAId: clipA.data.post.id, postBId: battleClipB, prize: 30 });
+    check('second open battle refused (400)', second.status === 400);
+    const bid = made.data.battle.id;
+    await alice.post('/api/battles/' + bid + '/vote', { postId: clipA.data.post.id });
+    await bob.post('/api/battles/' + bid + '/vote', { postId: battleClipB });
+    const tie = await founder.post('/api/battles/' + bid + '/close', {});
+    check('tied close without a pick -> 400', tie.status === 400);
+    await alice.post('/api/battles/' + bid + '/vote', { postId: battleClipB });
+    const bobCoins = (await bob.get('/api/me')).data.user.coins;
+    const closed = await founder.post('/api/battles/' + bid + '/close', {});
+    check('close crowns the vote leader', closed.status === 200 && closed.data.battle.winnerPostId === battleClipB, JSON.stringify(closed.data));
+    const bobAfter = (await bob.get('/api/me')).data.user.coins;
+    check('winner author paid the 30-coin prize', bobAfter === bobCoins + 30, bobCoins + ' -> ' + bobAfter);
+    const feed = await alice.get('/api/channels/' + clipsId + '/feed');
+    const winPost = feed.data.posts.find((p) => p.id === battleClipB);
+    check('winning clip wears the crown in the feed', !!winPost && winPost.crowned === true);
+    const lateVote = await alice.post('/api/battles/' + bid + '/vote', { postId: clipA.data.post.id });
+    check('voting on a closed battle -> 400', lateVote.status === 400);
+  });
+
+  /* ---------- feature pack: events + MVP ---------- */
+  console.log('\n[feature pack: events & mvp]');
+  await test('events calendar: founder creates, pack RSVPs, lobby shows it + MVP', async () => {
+    const memberTry = await alice.post('/api/events', { title: 'Sneaky', kind: 'Other', at: '2026-12-01T20:00:00Z' });
+    check('member cannot create events (403)', memberTry.status === 403);
+    const made = await founder.post('/api/events', {
+      title: 'Game Night: Warzone', kind: 'Game Night',
+      at: '2026-11-21T20:00:00-06:00', description: 'Squad up, mics on.',
+    });
+    check('event created', made.status === 201, JSON.stringify(made.data));
+    const eid = made.data.event.id;
+    const rsvp = await alice.post('/api/events/' + eid + '/rsvp', {});
+    check('RSVP in: going 1, mine', rsvp.status === 200 && rsvp.data.event.going === 1 && rsvp.data.event.mine === true);
+    const un = await alice.post('/api/events/' + eid + '/rsvp', {});
+    check('RSVP toggles back off', un.data.event.going === 0);
+    await alice.post('/api/events/' + eid + '/rsvp', {});
+    const feed = await alice.get('/api/channels/' + lobbyId + '/feed');
+    check('upcoming event shows on the Lobby', (feed.data.events || []).some((e) => e.id === eid));
+    check('pack MVP spotlights an active member', !!feed.data.mvp && feed.data.mvp.weeklyPoints > 0 && feed.data.mvp.user.role !== 'founder',
+      JSON.stringify(feed.data.mvp));
+    const del = await founder.del('/api/events/' + eid);
+    check('founder deletes event', del.status === 200);
+    const list = await alice.get('/api/events');
+    check('deleted event gone', !list.data.events.some((e) => e.id === eid));
+  });
+
+  /* ---------- feature pack: emotes + suggestions ---------- */
+  console.log('\n[feature pack: emotes & suggestions]');
+  await test('custom emotes: submit, approve, then usable pack-wide', async () => {
+    const png = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.alloc(48, 5)]);
+    const fd = new FormData();
+    fd.append('image', new Blob([png], { type: 'image/png' }), 'emote.png');
+    const up = await alice.post('/api/upload', fd, { form: true });
+    const sub = await alice.post('/api/emotes', { name: 'packlove', image: up.data.url });
+    check('emote submitted as pending', sub.status === 201 && sub.data.emote.status === 'pending', JSON.stringify(sub.data));
+    const bootAnon = await ANON.get('/api/bootstrap');
+    check('pending emote not yet public', !bootAnon.data.emotes.some((e) => e.name === 'packlove'));
+    const dup = await bob.post('/api/emotes', { name: 'packlove', image: up.data.url });
+    check('duplicate emote name 409', dup.status === 409);
+    const memberApprove = await alice.post('/api/admin/emotes/' + sub.data.emote.id + '/approve', {});
+    check('member cannot approve emotes (403)', memberApprove.status === 403);
+    const queue = await founder.get('/api/admin/emotes');
+    check('founder sees the pending queue', queue.data.emotes.some((e) => e.id === sub.data.emote.id && e.status === 'pending'));
+    const ok = await founder.post('/api/admin/emotes/' + sub.data.emote.id + '/approve', {});
+    check('founder approves emote', ok.status === 200 && ok.data.emote.status === 'approved');
+    const boot2 = await ANON.get('/api/bootstrap');
+    check('approved emote now in bootstrap for everyone', boot2.data.emotes.some((e) => e.name === 'packlove'));
+  });
+  await test('suggestion box: submit, upvote toggle, founder triage', async () => {
+    const s = await alice.post('/api/suggestions', { text: 'Add a dice roll command to chat' });
+    check('suggestion 201 open', s.status === 201 && s.data.suggestion.status === 'open');
+    const sid = s.data.suggestion.id;
+    const v1 = await bob.post('/api/suggestions/' + sid + '/vote', {});
+    check('upvote lands (1)', v1.data.suggestion.votes === 1 && v1.data.suggestion.mine === true);
+    const v2 = await bob.post('/api/suggestions/' + sid + '/vote', {});
+    check('upvote toggles off (0)', v2.data.suggestion.votes === 0);
+    const memberTriage = await alice.patch('/api/admin/suggestions/' + sid, { status: 'planned' });
+    check('member cannot triage (403)', memberTriage.status === 403);
+    const triage = await founder.patch('/api/admin/suggestions/' + sid, { status: 'planned' });
+    check('founder marks planned', triage.status === 200 && triage.data.suggestion.status === 'planned');
+    const list = await bob.get('/api/suggestions');
+    check('suggestion listed with status', list.data.suggestions.some((x) => x.id === sid && x.status === 'planned'));
+  });
+
+  /* ---------- feature pack: live banner ---------- */
+  console.log('\n[feature pack: live banner]');
+  await test('HOUNDY IS LIVE banner: manual toggle is honest + founder-only', async () => {
+    const before = await ANON.get('/api/bootstrap');
+    check('no manual source before toggle', before.data.live.source !== 'manual', JSON.stringify(before.data.live));
+    check('banner links to the Kick channel', before.data.live.url === 'https://kick.com/bludhound420');
+    const on = await founder.patch('/api/admin/settings', { liveManual: true });
+    check('founder flips manual live on', on.status === 200);
+    const lit = await ANON.get('/api/bootstrap');
+    check('banner shows, source = manual', lit.data.live.show === true && lit.data.live.source === 'manual');
+    const memberTry = await alice.patch('/api/admin/settings', { liveManual: false });
+    check('member cannot touch the toggle (403)', memberTry.status === 403);
+    const recheck = await founder.post('/api/admin/live-check', {});
+    check('live-check endpoint responds with state', recheck.status === 200 && typeof recheck.data.live.show === 'boolean');
+    await founder.patch('/api/admin/settings', { liveManual: false });
+    const off = await ANON.get('/api/bootstrap');
+    check('manual source clears after toggle off', off.data.live.source !== 'manual');
+  });
+
+  /* ---------- feature pack: watch party ---------- */
+  console.log('\n[feature pack: watch party]');
+  await test('watch party: host sets + controls, guests cannot hijack', async () => {
+    founderSocket = await connectSocket(founder);
+    founderSocket.emit('party:join');
+    await waitEvent(founderSocket, 'party:state', (d) => 'state' in d);
+    aliceSocket.emit('party:join');
+    const joinState = await waitEvent(aliceSocket, 'party:state', (d) => 'state' in d);
+    check('guest joins, no video yet, cannot host', joinState.state === null && joinState.canHost === false);
+    const setEvt = waitEvent(aliceSocket, 'party:state', (d) => d.state && d.state.videoId === 'dQw4w9WgXcQ');
+    founderSocket.emit('party:set', { youtube: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', title: 'Movie Night' });
+    const st = await setEvt;
+    check('host set the video, playing, host = founder', st.state.playing === true && st.state.hostId === founder.userId);
+    aliceSocket.emit('party:control', { action: 'pause', position: 5 });
+    aliceSocket.emit('party:set', { youtube: 'https://www.youtube.com/watch?v=e-ORhEE9VVg', title: 'Hijack' });
+    await sleep(400);
+    const now = await alice.get('/api/party');
+    check('guest control + set ignored (still playing, same video)', now.data.state.playing === true && now.data.state.videoId === 'dQw4w9WgXcQ');
+    const pauseEvt = waitEvent(aliceSocket, 'party:state', (d) => d.state && d.state.playing === false);
+    founderSocket.emit('party:control', { action: 'pause', position: 42 });
+    const paused = await pauseEvt;
+    check('host pause syncs to guests at position 42', paused.state.position === 42, JSON.stringify(paused.state));
+    const chatEvt = waitEvent(founderSocket, 'party:chat', (d) => d.message.text.includes('popcorn ready'));
+    aliceSocket.emit('party:chat', { text: 'popcorn ready 🍿' });
+    await chatEvt;
+    check('party side-chat relays between guests', true);
+  });
+
+  /* ---------- feature pack: trivia ---------- */
+  console.log('\n[feature pack: trivia]');
+  await test('trivia night: mod-run session, first correct answer scores', async () => {
+    const memberTry = await alice.post('/api/trivia/start', { channelId: lobbyId });
+    check('member cannot start trivia (403)', memberTry.status === 403);
+    const started = await founder.post('/api/trivia/start', { channelId: lobbyId });
+    check('founder starts trivia (5 questions)', started.status === 201 && started.data.questions === 5, JSON.stringify(started.data));
+    const again = await founder.post('/api/trivia/start', { channelId: lobbyId });
+    check('second start while running -> 400', again.status === 400);
+    const sysMsg = (pred) => waitEvent(bobSocket, 'chat:message',
+      (d) => d.message.author && d.message.author.username === 'trivia_moon' && pred(d.message.text), 20000);
+    let answered = 0;
+    for (let i = 0; i < 5; i++) {
+      const qMsg = await sysMsg((t) => t.includes('Trivia Q' + (i + 1) + '/'));
+      const m = /Trivia Q\d+\/\d+: (.*?) \(first correct/.exec(qMsg.message.text);
+      check('question ' + (i + 1) + ' posted by Trivia Moon', !!m, qMsg.message.text);
+      if (!m) break;
+      const bank = TRIVIA_BANK.find((q) => q.q === m[1]);
+      check('question ' + (i + 1) + ' found in the bank', !!bank, m[1]);
+      if (!bank) break;
+      if (i === 0) {
+        aliceSocket.emit('chat:send', { channelId: lobbyId, text: 'a wildly wrong guess' });
+        await sleep(400);
+      }
+      const winP = sysMsg((t) => t.includes('nailed it'));
+      const finalP = i === 4 ? sysMsg((t) => t.includes('Trivia final scores')) : null;
+      aliceSocket.emit('chat:send', { channelId: lobbyId, text: bank.answers[0] });
+      const win = await winP;
+      if (win.message.text.includes('Luna')) answered++;
+      if (finalP) var finalMsg = await finalP;
+    }
+    check('alice answered all 5 first', answered === 5, 'answered ' + answered);
+    const final = finalMsg;
+    check('final scoreboard names Luna with 5', final.message.text.includes('Luna') && final.message.text.includes('5'), final.message.text);
+    const sessions = await alice.get('/api/trivia');
+    check('session cleaned up after the final question', sessions.data.sessions.length === 0);
+    const start2 = await founder.post('/api/trivia/start', { channelId: musicId });
+    check('trivia can start in another channel', start2.status === 201);
+    const stop = await founder.post('/api/trivia/stop', { channelId: musicId });
+    check('host can stop trivia early', stop.status === 200);
+  });
+
   /* ---------- restart persistence ---------- */
   console.log('\n[persistence]');
   await test('data survives a full server restart', async () => {
     const coinsBefore = (await alice.get('/api/me')).data.user.coins;
     if (aliceSocket) aliceSocket.disconnect();
     if (bobSocket) bobSocket.disconnect();
+    if (founderSocket) founderSocket.disconnect();
     await stopServer();
     // Backdate the LFG post so it is expired by the time the server returns.
     const dbFile = path.join(DATA_DIR, 'db.json');
@@ -491,6 +815,16 @@ async function main() {
     check('expired LFG post no longer listed', !lfg.data.lfg.some((l) => l.id === lfgId));
     const settings = await rc.get('/api/bootstrap');
     check('settings intact after restart', settings.data.settings.announcement.includes('Game Night every Saturday'));
+    const howl = await rc.get('/api/howl');
+    check('pack howl total intact after restart', howl.data.total >= 2, 'total ' + howl.data.total);
+    const thread = await rc.get('/api/dms/' + bob.userId);
+    check('DM thread intact after restart', thread.data.messages.some((m) => m.text.includes('hello via dm')));
+    const battles = await rc.get('/api/battles');
+    check('closed battle + winner intact after restart',
+      battles.data.battles.some((b) => b.status === 'closed' && b.winnerPostId === battleClipB));
+    check('approved emote intact after restart', settings.data.emotes.some((e) => e.name === 'packlove'));
+    const party = await rc.get('/api/party');
+    check('watch party state intact after restart', !!party.data.state && party.data.state.videoId === 'dQw4w9WgXcQ' && party.data.state.playing === false);
   });
 
   await stopServer();
